@@ -33,3 +33,10 @@ ALLOWED_OCR_LANGUAGES = [
     "slk_frak", "slv", "snd", "spa", "spa_old", "sqi", "srp", "srp_latn", "sun", "swa", "swe", "syr", "tam", "tat",
     "tel", "tgk", "tgl", "tha", "tir", "ton", "tur", "uig", "ukr", "urd", "uzb", "uzb_cyrl", "vie", "yid", "yor"
 ]
+
+# Parametry dla modelu językowego
+VLLM_API_URL = "http://localhost:8000/v1"  # Domyślny adres API vLLM
+VLLM_MODEL_NAME = "google/gemma-3-27b"     # Nazwa modelu Gemma 3 27b
+VLLM_API_KEY = "your-api-key"              # Klucz API (jeśli wymagany)
+VLLM_MAX_TOKENS = 4096                     # Maksymalna liczba tokenów w odpowiedzi
+VLLM_TEMPERATURE = 0.7                     # Temperatura dla generowania odpowiedzi

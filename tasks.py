@@ -400,6 +400,222 @@ def perform_ocr_task(self,
 TEMP_DIR = settings.TEMP_FILES_DIR
 CLEANUP_AGE_HOURS = 24 # This could also be moved to settings
 
+# --- Helper function for LLM communication ---
+import base64
+import requests
+import time
+
+def send_images_to_llm(images, prompt=None):
+    """
+    Wysyła obrazy do modelu językowego poprzez API vLLM.
+
+    Args:
+        images (list): Lista obiektów PIL.Image.
+        prompt (str, optional): Dodatkowy prompt dla modelu językowego.
+
+    Returns:
+        dict: Odpowiedź z modelu językowego.
+    """
+    logger.info(f"Sending {len(images)} images to vLLM API.")
+    image_data = []
+    for img in images:
+        # Konwersja obrazu do formatu base64
+        buffered = BytesIO()
+        img.save(buffered, format="PNG") # Możesz wybrać inny format, np. JPEG
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        image_data.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_str}"}})
+
+    # Przygotowanie treści żądania
+    content = []
+    if prompt:
+        content.append({"type": "text", "text": prompt})
+    content.extend(image_data)
+
+    payload = {
+        "model": settings.VLLM_MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        "max_tokens": settings.VLLM_MAX_TOKENS,
+        "temperature": settings.VLLM_TEMPERATURE,
+    }
+
+    headers = {}
+    if settings.VLLM_API_KEY:
+        headers["Authorization"] = f"Bearer {settings.VLLM_API_KEY}"
+
+    try:
+        start_time = time.time()
+        response = requests.post(f"{settings.VLLM_API_URL}/chat/completions", json=payload, headers=headers, timeout=settings.VLLM_REQUEST_TIMEOUT)
+        response.raise_for_status() # Zgłoś wyjątek dla błędnych kodów statusu (4xx lub 5xx)
+        end_time = time.time()
+        processing_time = end_time - start_time
+
+        response_data = response.json()
+        logger.info(f"Received response from vLLM API. Processing time: {processing_time:.2f}s")
+
+        # Przetworzenie odpowiedzi
+        # Zakładamy, że odpowiedź jest w formacie zgodnym z OpenAI Chat Completions API
+        llm_response_text = ""
+        token_count = 0
+        if response_data and response_data.get("choices"):
+            choice = response_data["choices"][0]
+            llm_response_text = choice.get("message", {}).get("content", "")
+            token_count = response_data.get("usage", {}).get("total_tokens", 0)
+
+        return {
+            "model_name": settings.VLLM_MODEL_NAME,
+            "response_text": llm_response_text,
+            "processing_time": processing_time,
+            "token_count": token_count
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error communicating with vLLM API: {e}", exc_info=True)
+        raise # Przekaż błąd dalej
+    except Exception as e:
+        logger.error(f"Unexpected error processing vLLM response: {e}", exc_info=True)
+        raise # Przekaż błąd dalej
+
+# --- New Celery task for LLM processing ---
+from io import BytesIO # Import BytesIO
+
+@celery_app.task(bind=True)
+def perform_llm_task(self,
+                    pdf_path: str,
+                    file_hash: str,
+                    prompt: str = None,
+                    dpi: int = settings.PDF_CONVERSION_DPI):
+    """
+    Przetwarza plik PDF, konwertuje go na obrazy stron i wysyła do modelu językowego.
+
+    Args:
+        pdf_path (str): Ścieżka do pliku PDF.
+        file_hash (str): Unikalny hash pliku (używany do klucza cache).
+        prompt (str, optional): Dodatkowy prompt dla modelu językowego.
+        dpi (int): Rozdzielczość (dots per inch) używana podczas konwersji PDF na obrazy.
+
+    Returns:
+        dict: Słownik zawierający odpowiedź z modelu językowego i metadane.
+    """
+    task_id = self.request.id
+    logger.info(f"[{task_id}] Starting LLM task for PDF: {pdf_path}, Hash: {file_hash}, Prompt: {prompt}")
+
+    # --- 1. Wstępne sprawdzenie ---
+    if not os.path.exists(pdf_path):
+        logger.error(f"[{task_id}] File not found: {pdf_path}")
+        self.update_state(
+            state='FAILURE',
+            meta={'exc_type': 'FileNotFoundError', 'exc_message': f"PDF file not found at path: {pdf_path}"}
+        )
+        raise FileNotFoundError(f"PDF file not found at path: {pdf_path}")
+
+    images = []
+    llm_response_data = None
+
+    try:
+        # --- 2. Konwersja PDF na obrazy ---
+        try:
+            logger.info(f"[{task_id}] Converting PDF to images with DPI={dpi}...")
+            images = convert_from_path(pdf_path, dpi=dpi)
+            total_pages = len(images)
+            if total_pages == 0:
+                 logger.warning(f"[{task_id}] PDF file seems empty or conversion yielded no images: {pdf_path}")
+                 self.update_state(state='SUCCESS', meta={'result': 'PDF empty or no images converted', 'pages': 0})
+                 return {"message": "PDF empty or no images converted", "pages_processed": 0} # Zwróć pusty wynik
+            logger.info(f"[{task_id}] Converted PDF to {total_pages} images.")
+            self.update_state(state='STARTED', meta={'current': 0, 'total': total_pages, 'percent': 0})
+
+        except (PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError) as e:
+            logger.error(f"[{task_id}] Failed to convert PDF: {pdf_path} - {e}", exc_info=True)
+            self.update_state(
+                state='FAILURE',
+                meta={'exc_type': type(e).__name__, 'exc_message': str(e), 'traceback': traceback.format_exc()}
+            )
+            raise # Przekaż błąd dalej do Celery
+
+        # --- 3. Wysłanie obrazów do modelu językowego ---
+        try:
+            logger.info(f"[{task_id}] Sending images to LLM...")
+            llm_response_data = send_images_to_llm(images, prompt)
+            logger.info(f"[{task_id}] Received response from LLM.")
+            self.update_state(state='PROGRESS', meta={'current': total_pages, 'total': total_pages, 'percent': 100, 'message': 'LLM processing complete'})
+
+        except Exception as llm_err:
+            logger.error(f"[{task_id}] Failed to send images to LLM or process response: {llm_err}", exc_info=True)
+            self.update_state(
+                state='FAILURE',
+                meta={'exc_type': type(llm_err).__name__, 'exc_message': str(llm_err), 'traceback': traceback.format_exc()}
+            )
+            raise # Przekaż błąd dalej
+
+        # --- 4. Cache'owanie wyniku w Redis ---
+        cache_key = f"llm_result:{file_hash}:{prompt}" # Użyj hasha i promptu jako klucza cache
+        try:
+            # Serializuj wynik do JSON i zakoduj do bajtów przed zapisem w Redis
+            redis_client.set(cache_key, json.dumps(llm_response_data).encode('utf-8'), ex=settings.REDIS_CACHE_TTL_OCR) # Możesz użyć innego TTL dla LLM
+            logger.info(f"[{task_id}] Cached LLM result in Redis with key: {cache_key}")
+        except Exception as redis_err:
+            logger.warning(f"[{task_id}] Failed to cache LLM result in Redis: {redis_err}", exc_info=False)
+            # Nie przerywaj zadania z powodu błędu cache
+
+        # Mapowanie task_id -> hash (opcjonalne, ale przydatne do późniejszego odnajdywania wyników)
+        task_map_key = f"llm_task_hash:{task_id}" # Użyj innego klucza dla zadań LLM
+        try:
+            redis_client.set(task_map_key, f"{file_hash}:{prompt or ''}", ex=settings.REDIS_CACHE_TTL_TASK_MAP) # Store hash and prompt
+            logger.info(f"[{task_id}] Stored task_id-hash mapping in Redis: {task_map_key} -> {file_hash}")
+        except Exception as redis_err:
+            logger.warning(f"[{task_id}] Failed to store task_id-hash mapping in Redis: {redis_err}", exc_info=False)
+
+        # Oznacz jako sukces
+        self.update_state(state='SUCCESS', meta={'result': 'LLM processing completed successfully', 'pages_processed': total_pages, 'llm_response': llm_response_data})
+        logger.info(f"[{task_id}] LLM task completed successfully for PDF: {pdf_path}")
+        # Update task in database with success status and page count
+        # logger.info(f"[{task_id}] Attempting to update LLM task {task_id} in DB with status SUCCESS and pages {total_pages}.")
+        # update_llm_task(task_id, 'SUCCESS', total_pages, llm_response_data) # Potrzebna nowa funkcja update_llm_task
+        # logger.info(f"[{task_id}] Finished attempting to update LLM task {task_id} in DB.")
+
+
+        # Zwróć wynik
+        return llm_response_data
+
+    except Exception as e:
+        # Główny handler błędów - loguje, ustawia stan FAILURE i przekazuje wyjątek do Celery
+        logger.error(f"[{task_id}] LLM task failed for PDF: {pdf_path} - {e}", exc_info=True)
+        # Update task in database with failure status
+        # logger.error(f"[{task_id}] Attempting to update LLM task {task_id} in DB with status FAILURE.")
+        # update_llm_task(task_id, 'FAILURE') # Potrzebna nowa funkcja update_llm_task
+        # logger.error(f"[{task_id}] Finished attempting to update LLM task {task_id} in DB.")
+        self.update_state(
+            state='FAILURE',
+            meta={
+                'exc_type': type(e).__name__,
+                'exc_message': str(e),
+                'traceback': traceback.format_exc(),
+                'pdf_path': pdf_path,
+                'file_hash': file_hash
+            }
+        )
+        # Przekaż wyjątek, aby Celery oznaczyło zadanie jako nieudane
+        raise
+
+    finally:
+        # --- 5. Czyszczenie ---
+        # Zawsze próbuj usunąć plik tymczasowy, jeśli istnieje
+        if os.path.exists(pdf_path):
+            try:
+                logger.info(f"[{task_id}] Cleaning up temporary file: {pdf_path}")
+                os.remove(pdf_path)
+                logger.info(f"[{task_id}] Temporary file removed: {pdf_path}")
+            except OSError as remove_err:
+                logger.error(f"[{task_id}] Failed to remove temporary file {pdf_path}: {remove_err}", exc_info=True)
+        else:
+             logger.info(f"[{task_id}] Temporary file {pdf_path} not found for cleanup (already removed or error occurred earlier).")
+
+
 @celery_app.task
 def cleanup_temp_files():
     """

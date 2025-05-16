@@ -43,3 +43,20 @@ class OcrTask(BaseModel):
 
 class OcrTasksResponse(BaseModel):
     tasks: List[OcrTask]
+
+class LlmPageResult(BaseModel):
+    page_number: int
+    image_data: Optional[str] = None  # Base64-encoded image data (optional)
+
+class LlmResponse(BaseModel):
+    model_name: str
+    response_text: str
+    processing_time: float
+    token_count: Optional[int] = None
+    
+class LlmResultResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+    pages_processed: int
+    llm_response: LlmResponse

@@ -1,6 +1,9 @@
 /.venv/
 /__pycache__/
+/temp_files/
+/instructions/
 ocr_tasks.db
+
 # Systemowe
 .DS_Store
 Thumbs.db

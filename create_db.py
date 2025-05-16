@@ -36,8 +36,25 @@ def create_database():
             )
         ''')
 
+        # Utworzenie tabeli dla zadań LLM
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS llm_tasks (
+                id TEXT PRIMARY KEY,
+                start_time REAL NOT NULL,
+                end_time REAL,
+                client_ip TEXT NOT NULL,
+                document_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                prompt TEXT,
+                model_name TEXT,
+                response_text TEXT,
+                processing_time REAL,
+                token_count INTEGER
+            )
+        ''')
+
         conn.commit()
-        print(f"Baza danych '{db_path}' i tabele 'ocr_tasks', 'ocr_cache_hits' zostały utworzone pomyślnie.")
+        print(f"Baza danych '{db_path}' i tabele 'ocr_tasks', 'ocr_cache_hits', 'llm_tasks' zostały utworzone pomyślnie.")
 
     except sqlite3.Error as e:
         print(f"Wystąpił błąd SQLite: {e}")

@@ -29,5 +29,13 @@ class Settings(BaseSettings):
     REDIS_CACHE_TTL_OCR: int = 7 * 24 * 60 * 60 # 7 dni
     REDIS_CACHE_TTL_TASK_MAP: int = 1 * 24 * 60 * 60 # 1 dzień
     RATE_LIMIT_PER_MINUTE: int = 100
+    
+    # LLM Settings
+    VLLM_API_URL: str = "http://127.17.0.1:8000/v1"
+    VLLM_MODEL_NAME: str = "/model"
+    VLLM_API_KEY: Optional[str] = None
+    VLLM_MAX_TOKENS: int = 4096
+    VLLM_TEMPERATURE: float = 0.7
+    VLLM_REQUEST_TIMEOUT: int = 300  # Timeout dla żądań do API vLLM (w sekundach)
 
 settings = Settings()
