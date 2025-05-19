@@ -2,7 +2,7 @@ import os
 import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image
-from config import celery_app
+from settings import celery_app
 import cv2
 import numpy as np
 import redis
